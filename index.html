@@ -4872,8 +4872,8 @@ function showRouteError(msg) {
       </div>
     </div>
 
-    <!-- RESÍDUOS -->
-    <div class="fg">
+    <!-- RESÍDUOS (só aparece para Destinador e Reciclador, ver TIPOS_COM_RESIDUOS) -->
+    <div class="fg" id="residuos-field-wrap">
       <label>Resíduos aceitos / trabalhados</label>
       <div class="residuo-grid" id="residuo-grid"></div>
     </div>
@@ -5085,10 +5085,19 @@ function buildResiduoGrid() {
 }
 
 // ─── TIPO SELECTOR ────────────────────────────────────────
+// O campo "Resíduos aceitos / trabalhados" só faz sentido para quem recebe resíduo.
+const TIPOS_COM_RESIDUOS = ['destinador', 'reciclador'];
+function tipoTemResiduos(tipo) { return TIPOS_COM_RESIDUOS.includes(tipo); }
+function updateResiduosVisibility() {
+  const wrap = document.getElementById('residuos-field-wrap');
+  if (wrap) wrap.style.display = tipoTemResiduos(currentTipo) ? '' : 'none';
+}
+
 function selectTipo(tipo) {
   currentTipo = tipo;
   document.querySelectorAll('.tipo-card').forEach(c => c.classList.remove('selected'));
   document.querySelector(`.tipo-card[data-tipo="${tipo}"]`).classList.add('selected');
+  updateResiduosVisibility();
 }
 
 
@@ -5159,6 +5168,7 @@ function openModal(id, draft) {
   document.querySelector(`.tipo-card[data-tipo="${currentTipo}"]`).classList.add('selected');
 
   buildResiduoGrid();
+  updateResiduosVisibility();
   // Reset location search state (a menos que já venha de um clique no mapa, ver abaixo)
   modalNewLat = null; modalNewLng = null;
   const locSearch = document.getElementById('f-loc-search');
@@ -5225,7 +5235,7 @@ function savePoint() {
     cidade:       document.getElementById('f-end-cidade').value.trim(),
     uf:           document.getElementById('f-end-uf').value.trim(),
     obs:          document.getElementById('f-obs').value.trim(),
-    residuos:     [...currentResiduos],
+    residuos:     tipoTemResiduos(currentTipo) ? [...currentResiduos] : [],
     gmaps:        `https://maps.google.com/?q=${lat},${lng}`,
   };
 
