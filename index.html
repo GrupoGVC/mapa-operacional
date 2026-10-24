@@ -1423,6 +1423,22 @@ header {
 .residuo-add-btn:disabled { opacity: 0.5; cursor: default; }
 .residuo-msg { font-size: 0.7rem; margin-top: 6px; min-height: 0; }
 
+/* Preço por kg de cada resíduo (Reciclador = receita, Destinador = custo) */
+.residuo-precos { margin-top: 12px; border: 1px solid var(--border2); border-radius: 10px; padding: 10px 12px; }
+.residuo-precos-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.residuo-precos-title { font-family: var(--font-mono); font-size: 0.6rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted); }
+.residuo-precos-nat { font-size: 0.7rem; font-weight: 600; }
+.nat-receita { color: #059669; }
+.nat-custo { color: #dc2626; }
+.residuo-preco-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.residuo-preco-row + .residuo-preco-row { border-top: 1px dashed var(--border); }
+.residuo-preco-nome { flex: 1; font-size: 0.75rem; min-width: 0; }
+.residuo-preco-input { display: flex; align-items: center; gap: 4px; font-size: 0.72rem; color: var(--text-muted); }
+.fg .residuo-preco-input input { width: 92px; padding: 6px 8px; text-align: right; font-size: 0.8rem; }
+.fg .residuo-preco-input input.invalid { border-color: #dc2626; }
+.residuo-precos-hint { font-size: 0.7rem; color: var(--text-muted); }
+.popup-res-preco { font-weight: 700; margin-left: 4px; }
+
 
 /* Modal actions */
 .modal-actions {
@@ -2356,13 +2372,20 @@ function getSpreadsheet_() { return SpreadsheetApp.getActiveSpreadsheet(); }
 
 const SHEET_NAME = 'Pontos';
 const RES_SHEET_NAME = 'Residuos';
-const HEADERS = ['id','tipo','nome','cat','cnpj','contatoNome','tel','email','logradouro','numero','bairro','cidade','uf','cep','obs','residuos','lat','lng','gmaps'];
+const HEADERS = ['id','tipo','nome','cat','cnpj','contatoNome','tel','email','logradouro','numero','bairro','cidade','uf','cep','obs','residuos','lat','lng','gmaps','precos'];
 
 function getSheet_() {
   const ss = getSpreadsheet_();
   let sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
-  if (sheet.getLastRow() === 0) sheet.appendRow(HEADERS);
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(HEADERS);
+  } else {
+    // Planilhas criadas antes de novas colunas (ex: 'precos') ganham o cabeçalho que falta.
+    // Colunas novas sempre entram no fim de HEADERS, então os dados antigos continuam alinhados.
+    const atual = sheet.getRange(1, 1, 1, HEADERS.length).getValues()[0];
+    if (atual.join('|') !== HEADERS.join('|')) sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+  }
   return sheet;
 }
 
@@ -2377,9 +2400,11 @@ function findRow_(sheet, id) {
 }
 
 function pointToRow_(p) {
-  return HEADERS.map(h =&gt; h === 'residuos'
-    ? JSON.stringify(p.residuos || [])
-    : (p[h] !== undefined &amp;&amp; p[h] !== null ? p[h] : ''));
+  return HEADERS.map(h =&gt; {
+    if (h === 'residuos') return JSON.stringify(p.residuos || []);
+    if (h === 'precos') return JSON.stringify(p.precos || {}); // { "Plástico": 1.2, ... } em R$/kg
+    return (p[h] !== undefined &amp;&amp; p[h] !== null ? p[h] : '');
+  });
 }
 
 // ── Lista de tipos de resíduo (aba "Residuos", um por linha) ──
@@ -2421,6 +2446,7 @@ function doGet(e) {
       const obj = {};
       headers.forEach((h,i) =&gt; obj[h] = r[i]);
       try { obj.residuos = JSON.parse(obj.residuos || '[]'); } catch(err) { obj.residuos = []; }
+      try { obj.precos = JSON.parse(obj.precos || '{}'); } catch(err) { obj.precos = {}; }
       return obj;
     });
   return jsonResponse_(rows);
@@ -4971,6 +4997,7 @@ function showRouteError(msg) {
         <button type="button" class="residuo-add-btn" id="residuo-add-btn" onclick="adicionarTipoResiduo()">+ Adicionar</button>
       </div>
       <div class="residuo-msg" id="residuo-msg"></div>
+      <div class="residuo-precos" id="residuo-precos"></div>
     </div>
 
     <div class="fg">
@@ -5050,6 +5077,7 @@ let currentTipo = 'empresa';
 let currentResiduos = new Set();
 let residuosList = loadResiduosList();
 let residuosEditMode = false;
+let currentPrecos = {}; // resíduo → preço por kg digitado (texto, ex: "1,25") enquanto o formulário está aberto
 
 // ─── MAP ──────────────────────────────────────────────────
 const map = L.map('map', {
@@ -5200,6 +5228,7 @@ function buildResiduoGrid() {
         currentResiduos.add(r);
         chip.classList.add('selected');
       }
+      renderPrecosBlock();
     };
     if (residuosEditMode && !isExtra) {
       const del = document.createElement('button');
@@ -5214,6 +5243,73 @@ function buildResiduoGrid() {
   });
   document.getElementById('residuo-add-row').style.display = residuosEditMode ? 'flex' : 'none';
   document.getElementById('residuo-manage-btn').textContent = residuosEditMode ? '✓ Concluir' : '⚙ Gerenciar tipos';
+  renderPrecosBlock();
+}
+
+// ── Preço por kg ──
+// Reciclador compra o resíduo (receita pra GVC); Destinador cobra pra receber (custo).
+function naturezaPreco(tipo) {
+  if (tipo === 'reciclador') return { key: 'receita', label: 'Receita', icon: '💰', desc: 'quanto o reciclador paga por kg', cls: 'nat-receita' };
+  if (tipo === 'destinador') return { key: 'custo', label: 'Custo', icon: '💸', desc: 'quanto pagamos ao destinador por kg', cls: 'nat-custo' };
+  return null;
+}
+function fmtBRL(v) {
+  return Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 4 });
+}
+function fmtPrecoInput(v) {
+  return (v === null || v === undefined || v === '') ? '' :
+    Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+}
+// Aceita "1,25", "1.25", "R$ 1,25", "1.234,50". Vazio → null. Inválido → NaN.
+function parsePrecoBR(s) {
+  s = String(s ?? '').trim().replace(/R\$|\s/g, '');
+  if (!s) return null;
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  if (!/^\d+(\.\d+)?$/.test(s)) return NaN;
+  return Math.round(Number(s) * 10000) / 10000;
+}
+function precosDoPonto(p) {
+  return (p && p.precos && typeof p.precos === 'object') ? p.precos : {};
+}
+
+function renderPrecosBlock() {
+  const el = document.getElementById('residuo-precos');
+  if (!el) return;
+  const nat = naturezaPreco(currentTipo);
+  if (!nat) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  const ordem = [...residuosList, ...[...currentResiduos].filter(r => !residuosList.includes(r))];
+  const selecionados = ordem.filter(r => currentResiduos.has(r));
+  el.innerHTML = `
+    <div class="residuo-precos-head">
+      <span class="residuo-precos-title">Preço por kg</span>
+      <span class="residuo-precos-nat ${nat.cls}">${nat.icon} ${nat.label} — ${nat.desc}</span>
+    </div>
+    ${selecionados.length ? '' : '<div class="residuo-precos-hint">Marque os resíduos acima para informar o preço de cada um.</div>'}
+  `;
+  selecionados.forEach(r => {
+    const row = document.createElement('div');
+    row.className = 'residuo-preco-row';
+    const nome = document.createElement('span');
+    nome.className = 'residuo-preco-nome';
+    nome.textContent = r;
+    const wrap = document.createElement('span');
+    wrap.className = 'residuo-preco-input';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    input.placeholder = '0,00';
+    input.value = currentPrecos[r] ?? '';
+    input.setAttribute('aria-label', 'Preço por kg de ' + r);
+    input.oninput = () => {
+      currentPrecos[r] = input.value;
+      input.classList.toggle('invalid', Number.isNaN(parsePrecoBR(input.value)));
+    };
+    input.classList.toggle('invalid', Number.isNaN(parsePrecoBR(input.value)));
+    wrap.append('R$', input, '/kg');
+    row.append(nome, wrap);
+    el.appendChild(row);
+  });
 }
 
 function toggleResiduosEditMode() {
@@ -5318,6 +5414,7 @@ function tipoTemResiduos(tipo) { return TIPOS_COM_RESIDUOS.includes(tipo); }
 function updateResiduosVisibility() {
   const wrap = document.getElementById('residuos-field-wrap');
   if (wrap) wrap.style.display = tipoTemResiduos(currentTipo) ? '' : 'none';
+  renderPrecosBlock();
 }
 
 function selectTipo(tipo) {
@@ -5355,6 +5452,8 @@ function openModal(id, draft) {
     document.getElementById('f-obs').value = p.obs || '';
     currentTipo = p.tipo;
     currentResiduos = new Set(p.residuos || []);
+    currentPrecos = {};
+    Object.entries(precosDoPonto(p)).forEach(([r, v]) => { currentPrecos[r] = fmtPrecoInput(v); });
   } else if (draft) {
     document.getElementById('modal-title').textContent = 'NOVO LOCAL';
     document.getElementById('f-nome').value = draft.nome || '';
@@ -5372,6 +5471,7 @@ function openModal(id, draft) {
     document.getElementById('f-obs').value = draft.obs || '';
     currentTipo = draft.tipo || 'empresa';
     currentResiduos = new Set(draft.residuos || []);
+    currentPrecos = { ...(draft.precos || {}) };
   } else {
     document.getElementById('modal-title').textContent = 'NOVO LOCAL';
     document.getElementById('f-nome').value = '';
@@ -5388,6 +5488,7 @@ function openModal(id, draft) {
     document.getElementById('f-end-uf').value = '';
     document.getElementById('f-obs').value = '';
     currentTipo = 'empresa';
+    currentPrecos = {};
   }
 
   // reset tipo UI
@@ -5444,6 +5545,19 @@ function savePoint() {
     return;
   }
 
+  // Preço por kg: só para Destinador/Reciclador e só dos resíduos marcados.
+  const precosParaSalvar = {};
+  if (naturezaPreco(currentTipo)) {
+    for (const r of currentResiduos) {
+      const v = parsePrecoBR(currentPrecos[r]);
+      if (Number.isNaN(v)) {
+        alert('Preço inválido para "' + r + '". Use só números, ex: 1,25');
+        return;
+      }
+      if (v !== null) precosParaSalvar[r] = v;
+    }
+  }
+
   const nome = document.getElementById('f-nome').value.trim() || 'Sem nome';
   const lat = modalNewLat !== null ? modalNewLat : (editingId ? points.find(x=>x.id===editingId).lat : pendingLatLng.lat);
   const lng = modalNewLng !== null ? modalNewLng : (editingId ? points.find(x=>x.id===editingId).lng : pendingLatLng.lng);
@@ -5465,6 +5579,7 @@ function savePoint() {
     uf:           document.getElementById('f-end-uf').value.trim(),
     obs:          document.getElementById('f-obs').value.trim(),
     residuos:     tipoTemResiduos(currentTipo) ? [...currentResiduos] : [],
+    precos:       precosParaSalvar,
     gmaps:        `https://maps.google.com/?q=${lat},${lng}`,
   };
 
@@ -5543,6 +5658,8 @@ function enderecoCompleto(p) {
 function buildPopupHTML(p) {
   const t = TIPOS[p.tipo];
   const endereco = enderecoCompleto(p);
+  const nat = naturezaPreco(p.tipo);
+  const precos = precosDoPonto(p);
   return `
     <div class="popup-tipo" style="color:${t.color}">${t.icon} ${t.label}</div>
     <div class="popup-name">${p.nome}</div>
@@ -5556,8 +5673,8 @@ function buildPopupHTML(p) {
     ${p.obs ? `<div class="popup-row"><span class="popup-row-icon">📝</span><span class="popup-row-val">${p.obs}</span></div>` : ''}
     ${p.residuos && p.residuos.length ? `
       <div class="popup-divider"></div>
-      <div style="font-size:0.65rem;color:#5a6577;margin-bottom:4px;font-family:'Space Mono',monospace;letter-spacing:0.08em;">RESÍDUOS</div>
-      <div class="popup-residuos">${p.residuos.map(r=>`<span class="popup-res-tag">${r}</span>`).join('')}</div>
+      <div style="font-size:0.65rem;color:#5a6577;margin-bottom:4px;font-family:'Space Mono',monospace;letter-spacing:0.08em;">RESÍDUOS${nat && Object.keys(precos).length ? ` · <span class="${nat.cls}">${nat.label.toUpperCase()} POR KG</span>` : ''}</div>
+      <div class="popup-residuos">${p.residuos.map(r=>`<span class="popup-res-tag">${r}${nat && precos[r] != null ? `<span class="popup-res-preco ${nat.cls}">${fmtBRL(precos[r])}/kg</span>` : ''}</span>`).join('')}</div>
     ` : ''}
     ${p.gmaps ? `<a class="popup-edit-btn" href="${p.gmaps}" target="_blank" style="display:block;text-align:center;text-decoration:none;margin-bottom:6px;">📍 Ver no Google Maps</a>` : ''}
     <button class="popup-edit-btn" onclick="openModal('${p.id}')">✏ Editar informações</button>
@@ -5631,6 +5748,9 @@ function renderList() {
   el.innerHTML = filtered.slice().reverse().map(p => {
     const t = TIPOS[p.tipo];
     const topTags = (p.residuos || []).slice(0, 2);
+    const natT = naturezaPreco(p.tipo);
+    const precosT = precosDoPonto(p);
+    const tagTxt = r => natT && precosT[r] != null ? `${r} · ${fmtBRL(precosT[r])}` : r;
     return `
       <div class="list-item" style="border-left:3px solid ${t.color}" onclick="flyToPoint('${p.id}')">
         <button class="item-delete" onclick="event.stopPropagation();deletePoint('${p.id}')" title="Remover">✕</button>
@@ -5641,7 +5761,7 @@ function renderList() {
         </div>
         ${p.cat ? `<div style="font-size:0.68rem;color:var(--text-muted);margin-bottom:3px;padding-left:30px">${p.cat}</div>` : ''}
         ${p.tel || p.contatoNome ? `<div style="font-size:0.68rem;color:var(--text-muted);padding-left:30px">${p.contatoNome ? p.contatoNome+' · ' : ''}${p.tel || ''}</div>` : ''}
-        ${topTags.length ? `<div class="item-tags" style="padding-left:30px;margin-top:5px">${topTags.map(r=>`<span class="tag">${r}</span>`).join('')}${p.residuos.length > 2 ? `<span class="tag">+${p.residuos.length-2}</span>` : ''}</div>` : ''}
+        ${topTags.length ? `<div class="item-tags" style="padding-left:30px;margin-top:5px">${topTags.map(r=>`<span class="tag" ${natT && precosT[r] != null ? `title="${natT.label} por kg"` : ''}>${tagTxt(r)}</span>`).join('')}${p.residuos.length > 2 ? `<span class="tag">+${p.residuos.length-2}</span>` : ''}</div>` : ''}
       </div>
     `;
   }).join('');
@@ -5686,6 +5806,9 @@ function renderCadastrosTable() {
     const t = TIPOS[p.tipo];
     const cidadeUf = [p.cidade, p.uf].filter(Boolean).join('/');
     const topTags = (p.residuos || []).slice(0, 2);
+    const natT = naturezaPreco(p.tipo);
+    const precosT = precosDoPonto(p);
+    const tagTxt = r => natT && precosT[r] != null ? `${r} · ${fmtBRL(precosT[r])}` : r;
     return `
       <tr>
         <td><span class="cad-tipo-badge" style="background:${t.color}22;color:${t.color}">${t.icon} ${t.label}</span></td>
@@ -5694,7 +5817,7 @@ function renderCadastrosTable() {
         <td>${p.contatoNome || '—'}</td>
         <td>${p.tel || '—'}</td>
         <td>${cidadeUf || '—'}</td>
-        <td><div class="cad-tags">${topTags.map(r=>`<span class="tag">${r}</span>`).join('')}${p.residuos && p.residuos.length > 2 ? `<span class="tag">+${p.residuos.length-2}</span>` : (topTags.length ? '' : '—')}</div></td>
+        <td><div class="cad-tags">${topTags.map(r=>`<span class="tag" ${natT && precosT[r] != null ? `title="${natT.label} por kg"` : ''}>${tagTxt(r)}</span>`).join('')}${p.residuos && p.residuos.length > 2 ? `<span class="tag">+${p.residuos.length-2}</span>` : (topTags.length ? '' : '—')}</div></td>
         <td>
           <div class="cad-row-actions">
             <button class="cad-action-btn" onclick="openModal('${p.id}')" title="Editar cadastro">✏ Editar</button>
@@ -6040,6 +6163,7 @@ function collectDraftFromModal() {
     obs:          document.getElementById('f-obs').value,
     tipo:         currentTipo,
     residuos:     [...currentResiduos],
+    precos:       { ...currentPrecos },
   };
 }
 
@@ -6199,6 +6323,12 @@ function getExportRows() {
     'Endereço':    enderecoCompleto(p),
     'Observações': p.obs || '',
     'Resíduos':    (p.residuos || []).join(', '),
+    'Preço por kg': (() => {
+      const nat = naturezaPreco(p.tipo);
+      const precos = precosDoPonto(p);
+      const itens = (p.residuos || []).filter(r => precos[r] != null).map(r => `${r}: ${fmtBRL(precos[r])}`);
+      return nat && itens.length ? `${nat.label} — ${itens.join('; ')}` : '';
+    })(),
     'Latitude':    p.lat,
     'Longitude':   p.lng,
     'Google Maps': `https://maps.google.com/?q=${p.lat},${p.lng}`,
@@ -6227,7 +6357,7 @@ function exportXLSX() {
   // Column widths
   ws['!cols'] = [
     {wch:14},{wch:30},{wch:20},{wch:20},{wch:20},{wch:16},{wch:28},
-    {wch:40},{wch:30},{wch:40},{wch:12},{wch:12},{wch:50}
+    {wch:40},{wch:30},{wch:40},{wch:50},{wch:12},{wch:12},{wch:50}
   ];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Pontos GVC');
@@ -6890,6 +7020,10 @@ function parseResiduosField(arr) {
     if (p.residuos && typeof p.residuos === 'string') {
       try { p.residuos = JSON.parse(p.residuos); } catch(e) { p.residuos = []; }
     }
+    if (typeof p.precos === 'string') {
+      try { p.precos = p.precos ? JSON.parse(p.precos) : {}; } catch(e) { p.precos = {}; }
+    }
+    if (!p.precos || typeof p.precos !== 'object' || Array.isArray(p.precos)) p.precos = {};
   });
   return arr;
 }
