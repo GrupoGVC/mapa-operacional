@@ -1399,6 +1399,29 @@ header {
   color: var(--retec);
   background: var(--retec-dim);
 }
+.res-chip { display: inline-flex; align-items: center; gap: 6px; }
+.res-chip.extra { border-style: dashed; }
+.res-chip-del {
+  background: none; border: none; color: inherit; cursor: pointer;
+  font-size: 0.95rem; line-height: 1; padding: 0 0 0 2px; opacity: 0.55;
+}
+.res-chip-del:hover { opacity: 1; color: #e84393; }
+.residuo-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.residuo-label-row label { margin-bottom: 6px; }
+.residuo-manage-btn {
+  background: none; border: none; padding: 0 0 6px; cursor: pointer;
+  color: var(--retec); font-family: var(--font-main); font-size: 0.72rem; font-weight: 600;
+}
+.residuo-manage-btn:hover { text-decoration: underline; }
+.residuo-add-row { display: none; gap: 6px; margin-top: 10px; }
+.fg .residuo-add-row input { flex: 1; width: auto; min-width: 0; }
+.residuo-add-btn {
+  background: var(--retec); color: #000; border: none; border-radius: 8px;
+  font-family: var(--font-main); font-size: 0.78rem; font-weight: 700;
+  padding: 0 14px; cursor: pointer; white-space: nowrap;
+}
+.residuo-add-btn:disabled { opacity: 0.5; cursor: default; }
+.residuo-msg { font-size: 0.7rem; margin-top: 6px; min-height: 0; }
 
 
 /* Modal actions */
@@ -2328,11 +2351,15 @@ header {
           padding:12px;font-family:'Space Mono',monospace;font-size:0.65rem;
           color:#dde4ec;overflow-x:auto;white-space:pre;line-height:1.6;
           max-height:200px;overflow-y:auto;
-        ">const SHEET_NAME = 'Pontos';
+        ">// Cole este código em Extensões → Apps Script da planilha que vai servir de banco de dados.
+function getSpreadsheet_() { return SpreadsheetApp.getActiveSpreadsheet(); }
+
+const SHEET_NAME = 'Pontos';
+const RES_SHEET_NAME = 'Residuos';
 const HEADERS = ['id','tipo','nome','cat','cnpj','contatoNome','tel','email','logradouro','numero','bairro','cidade','uf','cep','obs','residuos','lat','lng','gmaps'];
 
 function getSheet_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getSpreadsheet_();
   let sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
   if (sheet.getLastRow() === 0) sheet.appendRow(HEADERS);
@@ -2341,74 +2368,133 @@ function getSheet_() {
 
 function findRow_(sheet, id) {
   const last = sheet.getLastRow();
-  if (last < 2) return -1;
+  if (last &lt; 2) return -1;
   const ids = sheet.getRange(2, 1, last - 1, 1).getValues();
-  for (let i = 0; i < ids.length; i++) {
+  for (let i = 0; i &lt; ids.length; i++) {
     if (String(ids[i][0]) === String(id)) return i + 2;
   }
   return -1;
 }
 
 function pointToRow_(p) {
-  return HEADERS.map(h => h === 'residuos'
+  return HEADERS.map(h =&gt; h === 'residuos'
     ? JSON.stringify(p.residuos || [])
-    : (p[h] !== undefined && p[h] !== null ? p[h] : ''));
+    : (p[h] !== undefined &amp;&amp; p[h] !== null ? p[h] : ''));
+}
+
+// ── Lista de tipos de resíduo (aba "Residuos", um por linha) ──
+function getResSheet_() {
+  const ss = getSpreadsheet_();
+  let sheet = ss.getSheetByName(RES_SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(RES_SHEET_NAME);
+  if (sheet.getLastRow() === 0) sheet.appendRow(['residuo']);
+  return sheet;
+}
+
+function getResiduos_() {
+  const sheet = getResSheet_();
+  const last = sheet.getLastRow();
+  if (last &lt; 2) return [];
+  return sheet.getRange(2, 1, last - 1, 1).getValues()
+    .map(r =&gt; String(r[0]).trim())
+    .filter(x =&gt; x !== '');
+}
+
+function setResiduos_(list) {
+  const sheet = getResSheet_();
+  sheet.clearContents();
+  sheet.appendRow(['residuo']);
+  if (list.length) sheet.getRange(2, 1, list.length, 1).setNumberFormat('@').setValues(list.map(x =&gt; [String(x)]));
 }
 
 function doGet(e) {
+  if (e &amp;&amp; e.parameter &amp;&amp; e.parameter.action === 'residuos') {
+    return jsonResponse_(getResiduos_());
+  }
   const sheet = getSheet_();
   const data = sheet.getDataRange().getValues();
-  if (data.length <= 1) return jsonResponse_([]);
+  if (data.length &lt;= 1) return jsonResponse_([]);
   const headers = data[0];
   const rows = data.slice(1)
-    .filter(r => r[0] !== '')
-    .map(r => {
+    .filter(r =&gt; r[0] !== '')
+    .map(r =&gt; {
       const obj = {};
-      headers.forEach((h,i) => obj[h] = r[i]);
+      headers.forEach((h,i) =&gt; obj[h] = r[i]);
       try { obj.residuos = JSON.parse(obj.residuos || '[]'); } catch(err) { obj.residuos = []; }
       return obj;
     });
   return jsonResponse_(rows);
 }
 
-// Aceita 3 formatos no corpo do POST:
-//  {action:'upsert', point:{...}}  → cria ou atualiza 1 linha (pelo id)
-//  {action:'delete', id:'...'}     → apaga 1 linha (pelo id)
-//  [ {...}, {...} ]                → substitui a planilha inteira (usado só pelos
-//                                     botões "Forçar envio" / backup manual)
+// Ações aceitas no corpo do POST:
+//  {action:'upsert', point:{...}}      → cria ou atualiza 1 ponto (pelo id)
+//  {action:'delete', id:'...'}         → apaga 1 ponto (pelo id)
+//  {action:'addResiduo', nome:'...'}   → adiciona um tipo de resíduo à lista
+//  {action:'deleteResiduo', nome:'...'}→ remove um tipo de resíduo da lista
+//  {action:'setResiduos', list:[...]}  → preenche a lista só se ela ainda estiver vazia
+//  [ {...}, {...} ]                    → substitui todos os pontos (backup manual)
 function doPost(e) {
-  const body = JSON.parse(e.postData.contents);
-  const sheet = getSheet_();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const body = JSON.parse(e.postData.contents);
 
-  if (body && body.action === 'upsert' && body.point) {
-    const row = pointToRow_(body.point);
-    const rowIdx = findRow_(sheet, body.point.id);
-    if (rowIdx === -1) sheet.appendRow(row);
-    else sheet.getRange(rowIdx, 1, 1, HEADERS.length).setValues([row]);
-    return jsonResponse_({ ok: true });
+    if (body &amp;&amp; body.action === 'addResiduo' &amp;&amp; body.nome) {
+      const nome = String(body.nome).trim();
+      const list = getResiduos_();
+      if (!list.some(x =&gt; x.toLowerCase() === nome.toLowerCase())) {
+        list.push(nome);
+        setResiduos_(list);
+      }
+      return jsonResponse_({ ok: true, list: list });
+    }
+
+    if (body &amp;&amp; body.action === 'deleteResiduo' &amp;&amp; body.nome) {
+      const list = getResiduos_().filter(x =&gt; x !== String(body.nome));
+      setResiduos_(list);
+      return jsonResponse_({ ok: true, list: list });
+    }
+
+    if (body &amp;&amp; body.action === 'setResiduos' &amp;&amp; Array.isArray(body.list)) {
+      if (getResiduos_().length === 0) setResiduos_(body.list.map(String).filter(x =&gt; x.trim() !== ''));
+      return jsonResponse_({ ok: true, list: getResiduos_() });
+    }
+
+    const sheet = getSheet_();
+
+    if (body &amp;&amp; body.action === 'upsert' &amp;&amp; body.point) {
+      const row = pointToRow_(body.point);
+      const rowIdx = findRow_(sheet, body.point.id);
+      if (rowIdx === -1) sheet.appendRow(row);
+      else sheet.getRange(rowIdx, 1, 1, HEADERS.length).setValues([row]);
+      return jsonResponse_({ ok: true });
+    }
+
+    if (body &amp;&amp; body.action === 'delete' &amp;&amp; body.id) {
+      const rowIdx = findRow_(sheet, body.id);
+      if (rowIdx !== -1) sheet.deleteRow(rowIdx);
+      return jsonResponse_({ ok: true });
+    }
+
+    if (Array.isArray(body)) {
+      sheet.clearContents();
+      sheet.appendRow(HEADERS);
+      body.forEach(p =&gt; sheet.appendRow(pointToRow_(p)));
+      return jsonResponse_({ ok: true, count: body.length });
+    }
+
+    return jsonResponse_({ ok: false, error: 'ação desconhecida' });
+  } finally {
+    lock.releaseLock();
   }
-
-  if (body && body.action === 'delete' && body.id) {
-    const rowIdx = findRow_(sheet, body.id);
-    if (rowIdx !== -1) sheet.deleteRow(rowIdx);
-    return jsonResponse_({ ok: true });
-  }
-
-  if (Array.isArray(body)) {
-    sheet.clearContents();
-    sheet.appendRow(HEADERS);
-    body.forEach(p => sheet.appendRow(pointToRow_(p)));
-    return jsonResponse_({ ok: true, count: body.length });
-  }
-
-  return jsonResponse_({ ok: false, error: 'ação desconhecida' });
 }
 
 function jsonResponse_(data) {
   return ContentService
     .createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
-}</pre>
+}
+</pre>
       </div>
     </div>
 
@@ -4874,8 +4960,17 @@ function showRouteError(msg) {
 
     <!-- RESÍDUOS (só aparece para Destinador e Reciclador, ver TIPOS_COM_RESIDUOS) -->
     <div class="fg" id="residuos-field-wrap">
-      <label>Resíduos aceitos / trabalhados</label>
+      <div class="residuo-label-row">
+        <label>Resíduos aceitos / trabalhados</label>
+        <button type="button" class="residuo-manage-btn" id="residuo-manage-btn" onclick="toggleResiduosEditMode()">⚙ Gerenciar tipos</button>
+      </div>
       <div class="residuo-grid" id="residuo-grid"></div>
+      <div class="residuo-add-row" id="residuo-add-row">
+        <input type="text" id="residuo-new-input" maxlength="60" placeholder="Novo tipo de resíduo (ex: Pneu inservível)"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();adicionarTipoResiduo();}">
+        <button type="button" class="residuo-add-btn" id="residuo-add-btn" onclick="adicionarTipoResiduo()">+ Adicionar</button>
+      </div>
+      <div class="residuo-msg" id="residuo-msg"></div>
     </div>
 
     <div class="fg">
@@ -4930,7 +5025,10 @@ const TIPOS = {
   reciclador:    { label: 'Reciclador',    icon: '🔄', color: '#34d399' },
 };
 
-const RESIDUOS = [
+// Lista padrão de tipos de resíduo — usada só na primeira vez. Depois a lista
+// passa a ser editável pelo botão "⚙ Gerenciar tipos" no formulário, fica salva
+// no navegador (gvc_residuos_v1) e é compartilhada pela aba "Residuos" da planilha.
+const RESIDUOS_PADRAO = [
   'Classe I – Perigoso','Classe II – Não Perigoso',
   'Solvente','Óleo Mineral','Embalagem Contaminada',
   'Lâmpada Fluorescente','Pilha / Bateria','Eletrônico (REEE)',
@@ -4950,6 +5048,8 @@ let editingId = null;
 let pendingDraft = null; // dados digitados num cadastro novo, aguardando o clique no mapa
 let currentTipo = 'empresa';
 let currentResiduos = new Set();
+let residuosList = loadResiduosList();
+let residuosEditMode = false;
 
 // ─── MAP ──────────────────────────────────────────────────
 const map = L.map('map', {
@@ -5064,13 +5164,34 @@ function applyFilters() {
 }
 
 // ─── RESIDUOS GRID ────────────────────────────────────────
+function isResiduosList(x) {
+  return Array.isArray(x) && x.every(v => typeof v === 'string');
+}
+function loadResiduosList() {
+  try {
+    const l = JSON.parse(localStorage.getItem('gvc_residuos_v1') || 'null');
+    if (isResiduosList(l) && l.length) return l;
+  } catch(e) {}
+  return RESIDUOS_PADRAO.slice();
+}
+function saveResiduosListLocal() {
+  try { localStorage.setItem('gvc_residuos_v1', JSON.stringify(residuosList)); } catch(e) {}
+}
+
 function buildResiduoGrid() {
   const el = document.getElementById('residuo-grid');
   el.innerHTML = '';
-  RESIDUOS.forEach(r => {
+  // Resíduos que este cadastro já tinha mas que saíram da lista continuam aparecendo
+  // (borda tracejada), pra pessoa poder desmarcar se quiser.
+  const extras = [...currentResiduos].filter(r => !residuosList.includes(r));
+  [...residuosList, ...extras].forEach(r => {
+    const isExtra = !residuosList.includes(r);
     const chip = document.createElement('div');
-    chip.className = 'res-chip' + (currentResiduos.has(r) ? ' selected' : '');
-    chip.textContent = r;
+    chip.className = 'res-chip' + (currentResiduos.has(r) ? ' selected' : '') + (isExtra ? ' extra' : '');
+    if (isExtra) chip.title = 'Este tipo foi removido da lista, mas continua marcado neste cadastro. Clique para desmarcar.';
+    const label = document.createElement('span');
+    label.textContent = r;
+    chip.appendChild(label);
     chip.onclick = () => {
       if (currentResiduos.has(r)) {
         currentResiduos.delete(r);
@@ -5080,8 +5201,114 @@ function buildResiduoGrid() {
         chip.classList.add('selected');
       }
     };
+    if (residuosEditMode && !isExtra) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'res-chip-del';
+      del.textContent = '×';
+      del.title = 'Remover "' + r + '" da lista';
+      del.onclick = (ev) => { ev.stopPropagation(); removerTipoResiduo(r); };
+      chip.appendChild(del);
+    }
     el.appendChild(chip);
   });
+  document.getElementById('residuo-add-row').style.display = residuosEditMode ? 'flex' : 'none';
+  document.getElementById('residuo-manage-btn').textContent = residuosEditMode ? '✓ Concluir' : '⚙ Gerenciar tipos';
+}
+
+function toggleResiduosEditMode() {
+  residuosEditMode = !residuosEditMode;
+  showResiduoMsg('');
+  buildResiduoGrid();
+  if (residuosEditMode) setTimeout(() => document.getElementById('residuo-new-input').focus(), 30);
+}
+
+function showResiduoMsg(msg, ok) {
+  const el = document.getElementById('residuo-msg');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = ok === false ? '#e84393' : 'var(--text-muted)';
+}
+
+// Envia a alteração da lista pra planilha (se configurada). A planilha devolve a
+// lista atualizada, que passa a valer aqui. Sem planilha, a mudança fica só local.
+async function syncResiduosAction(body) {
+  const url = localStorage.getItem('gvc_sheets_url');
+  if (!url) return true;
+  const btn = document.getElementById('residuo-add-btn');
+  if (btn) btn.disabled = true;
+  setSyncStatus('syncing');
+  showResiduoMsg('Salvando na planilha...');
+  try {
+    const res = await fetch(url, { method: 'POST', body: JSON.stringify(body) });
+    const data = await res.json();
+    if (data && data.ok && isResiduosList(data.list)) {
+      residuosList = data.list;
+      setSyncStatus('ok');
+      showResiduoMsg('');
+      return true;
+    }
+    if (data && data.error === 'ação desconhecida') {
+      throw new Error('O Apps Script da planilha está desatualizado: cole o código novo (menu Exportar → 🔗 Google Sheets) e publique uma nova versão.');
+    }
+    throw new Error('Resposta inválida da planilha.');
+  } catch(e) {
+    setSyncStatus('error');
+    showResiduoMsg('Não consegui salvar na planilha. ' + (e && e.message && !/fetch|network/i.test(e.message) ? e.message : 'Verifique a conexão e tente de novo.'), false);
+    return false;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function adicionarTipoResiduo() {
+  const input = document.getElementById('residuo-new-input');
+  const nome = input.value.trim().replace(/\s+/g, ' ');
+  if (!nome) { input.focus(); return; }
+  if (residuosList.some(x => x.toLowerCase() === nome.toLowerCase())) {
+    showResiduoMsg('"' + nome + '" já está na lista.', false);
+    return;
+  }
+  const ok = await syncResiduosAction({ action: 'addResiduo', nome });
+  if (!ok) return;
+  if (!residuosList.some(x => x.toLowerCase() === nome.toLowerCase())) residuosList.push(nome);
+  saveResiduosListLocal();
+  currentResiduos.add(nome); // já deixa marcado no cadastro que está sendo editado
+  input.value = '';
+  buildResiduoGrid();
+  showResiduoMsg('✓ "' + nome + '" adicionado à lista.');
+  input.focus();
+}
+
+async function removerTipoResiduo(nome) {
+  if (!confirm('Remover "' + nome + '" da lista de resíduos?\n\nOs cadastros que já têm esse resíduo continuam com ele.')) return;
+  const ok = await syncResiduosAction({ action: 'deleteResiduo', nome });
+  if (!ok) return;
+  residuosList = residuosList.filter(x => x !== nome);
+  saveResiduosListLocal();
+  currentResiduos.delete(nome);
+  buildResiduoGrid();
+  showResiduoMsg('✓ "' + nome + '" removido da lista.');
+}
+
+// Busca a lista compartilhada na planilha. Se a aba "Residuos" ainda estiver vazia,
+// preenche com a lista atual. Se o Apps Script for da versão antiga (sem suporte
+// a lista de resíduos), não faz nada e a lista continua local.
+async function pullResiduos(url) {
+  try {
+    const sep = url.includes('?') ? '&' : '?';
+    const res = await fetch(url + sep + 'action=residuos');
+    const remote = await res.json();
+    if (!isResiduosList(remote)) return;
+    if (remote.length === 0) {
+      const r2 = await fetch(url, { method: 'POST', body: JSON.stringify({ action: 'setResiduos', list: residuosList }) });
+      const d2 = await r2.json();
+      if (d2 && d2.ok && isResiduosList(d2.list) && d2.list.length) { residuosList = d2.list; saveResiduosListLocal(); }
+      return;
+    }
+    residuosList = remote;
+    saveResiduosListLocal();
+  } catch(e) {}
 }
 
 // ─── TIPO SELECTOR ────────────────────────────────────────
@@ -5167,6 +5394,8 @@ function openModal(id, draft) {
   document.querySelectorAll('.tipo-card').forEach(c => c.classList.remove('selected'));
   document.querySelector(`.tipo-card[data-tipo="${currentTipo}"]`).classList.add('selected');
 
+  residuosEditMode = false;
+  showResiduoMsg('');
   buildResiduoGrid();
   updateResiduosVisibility();
   // Reset location search state (a menos que já venha de um clique no mapa, ver abaixo)
@@ -6689,6 +6918,7 @@ async function silentPull() {
     const remote = await res.json();
     if (!Array.isArray(remote)) throw new Error('Resposta inválida');
     replacePointsFromRemote(remote);
+    await pullResiduos(url);
     setSyncStatus('ok');
   } catch(e) {
     setSyncStatus('error');
@@ -6754,6 +6984,7 @@ async function runSheetsBootstrapSync() {
     } else if (Array.isArray(remote)) {
       replacePointsFromRemote(remote);
     }
+    await pullResiduos(url);
     setSyncStatus('ok');
     await flushSyncQueue();
     return true;
